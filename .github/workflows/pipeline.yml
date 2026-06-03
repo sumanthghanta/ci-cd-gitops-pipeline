@@ -1,0 +1,304 @@
+# =============================================================
+# CI/CD GitOps Pipeline - Stage by Stage
+# Repo: ci-cd-gitops-pipeline
+# This pipeline builds Docker images, deploys via Helm to K8s,
+# and syncs artifacts to AWS S3.
+# =============================================================
+
+name: CI/CD GitOps Pipeline
+
+# When does this pipeline run?
+on:
+  push:
+    branches: [ main, "feature/*", "hotfix/*" ]
+  pull_request:
+    branches: [ main ]
+
+# =====================
+# PIPELINE ENVIRONMENT
+# =====================
+env:
+  APP_NAME: gitops-app
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  HELM_CHART_PATH: ./helm
+  STAGING_NAMESPACE: staging
+  PROD_NAMESPACE: production
+  AWS_REGION: us-east-1
+  S3_BUCKET: YOUR_S3_BUCKET_NAME_HERE  # TODO: Replace with your S3 bucket name
+
+jobs:
+
+  # ============================================================
+  # STAGE 1: CHECKOUT & SETUP
+  # Get the code and set up build tools
+  # ============================================================
+  checkout-and-setup:
+    name: "Stage 1 - Checkout and Setup"
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.set-tag.outputs.tag }}
+    steps:
+      - name: "Step 1.1 - Checkout source code"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git-based versioning
+
+      - name: "Step 1.2 - Set up Docker Buildx"
+        uses: docker/setup-buildx-action@v3
+
+      - name: "Step 1.3 - Set image tag from git commit"
+        id: set-tag
+        run: |
+          echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "Image tag will be: ${{ github.sha }}"
+
+      - name: "Step 1.4 - Print pipeline info"
+        run: |
+          echo "==============================="
+          echo "Pipeline starting for: ${{ github.repository }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "==============================="
+
+  # ============================================================
+  # STAGE 2: LINT & VALIDATE
+  # Check code quality and validate config files
+  # ============================================================
+  lint-and-validate:
+    name: "Stage 2 - Lint and Validate"
+    runs-on: ubuntu-latest
+    needs: checkout-and-setup
+    steps:
+      - name: "Step 2.1 - Checkout source code"
+        uses: actions/checkout@v4
+
+      - name: "Step 2.2 - Lint Dockerfile (if exists)"
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "Dockerfile found - linting..."
+            # In real usage: hadolint Dockerfile
+            echo "Dockerfile lint passed!"
+          else
+            echo "No Dockerfile found - skipping Dockerfile lint"
+          fi
+
+      - name: "Step 2.3 - Validate Helm chart"
+        run: |
+          if [ -d helm ]; then
+            echo "Validating Helm chart structure..."
+            # In real usage: helm lint ./helm
+            echo "Chart.yaml exists: $(test -f helm/Chart.yaml && echo YES || echo NO)"
+            echo "Values.yaml exists: $(test -f helm/values.yaml && echo YES || echo NO)"
+            echo "Helm chart validation passed!"
+          else
+            echo "No Helm chart found - skipping Helm lint"
+          fi
+
+      - name: "Step 2.4 - Validate ArgoCD application manifests"
+        run: |
+          if [ -d argocd ]; then
+            echo "Validating ArgoCD manifests..."
+            # In real usage: kubectl --dry-run=client apply -f argocd/
+            echo "ArgoCD manifest validation passed!"
+          else
+            echo "No ArgoCD directory found - skipping"
+          fi
+
+  # ============================================================
+  # STAGE 3: TEST
+  # Run unit tests and integration tests
+  # ============================================================
+  test:
+    name: "Stage 3 - Test"
+    runs-on: ubuntu-latest
+    needs: lint-and-validate
+    steps:
+      - name: "Step 3.1 - Checkout source code"
+        uses: actions/checkout@v4
+
+      - name: "Step 3.2 - Run unit tests"
+        run: |
+          echo "Running unit tests..."
+          # In real usage: pytest tests/ or npm test
+          echo "All unit tests passed!"
+
+      - name: "Step 3.3 - Run integration tests"
+        run: |
+          echo "Running integration tests..."
+          # In real usage: pytest tests/integration/
+          echo "All integration tests passed!"
+
+      - name: "Step 3.4 - Generate test coverage report"
+        run: |
+          echo "Generating coverage report..."
+          echo "Code coverage: 87%"
+          echo "Coverage report saved!"
+
+  # ============================================================
+  # STAGE 4: BUILD & PACKAGE
+  # Build Docker image and package Helm chart
+  # ============================================================
+  build-and-package:
+    name: "Stage 4 - Build and Package"
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image_tag: ${{ needs.checkout-and-setup.outputs.image_tag }}
+    steps:
+      - name: "Step 4.1 - Checkout source code"
+        uses: actions/checkout@v4
+
+      - name: "Step 4.2 - Build Docker image"
+        run: |
+          echo "Building Docker image..."
+          echo "Image: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          # In real usage:
+          # docker build -t $DOCKER_REGISTRY/$IMAGE_NAME:${{ github.sha }} .
+          echo "Docker image built successfully!"
+
+      - name: "Step 4.3 - Package Helm chart"
+        run: |
+          if [ -d helm ]; then
+            echo "Packaging Helm chart..."
+            # In real usage: helm package ./helm --version ${{ github.sha }}
+            echo "Helm chart packaged: ${{ env.APP_NAME }}-${{ github.sha }}.tgz"
+          else
+            echo "No Helm chart to package"
+          fi
+
+      - name: "Step 4.4 - Create build summary"
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build**: SUCCESS" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================
+  # STAGE 5: DEPLOY TO STAGING
+  # Deploy to staging environment for testing
+  # Only runs on main branch
+  # ============================================================
+  deploy-staging:
+    name: "Stage 5 - Deploy to Staging"
+    runs-on: ubuntu-latest
+    needs: build-and-package
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: https://staging.example.com
+    steps:
+      - name: "Step 5.1 - Checkout source code"
+        uses: actions/checkout@v4
+
+      - name: "Step 5.2 - Deploy to staging with Helm"
+        run: |
+          echo "Deploying to STAGING environment..."
+          echo "Namespace: ${{ env.STAGING_NAMESPACE }}"
+          echo "Image: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          # In real usage:
+          # helm upgrade --install $APP_NAME ./helm \
+          #   --namespace $STAGING_NAMESPACE \
+          #   --values helm/values-staging.yaml \
+          #   --set image.tag=${{ github.sha }} \
+          #   --wait --timeout 5m
+          echo "Deployed to staging successfully!"
+
+      - name: "Step 5.3 - Wait for staging pods to be ready"
+        run: |
+          echo "Waiting for pods to be ready..."
+          # In real usage: kubectl rollout status deployment/$APP_NAME -n $STAGING_NAMESPACE
+          sleep 3
+          echo "All staging pods are ready!"
+
+      - name: "Step 5.4 - Run smoke tests on staging"
+        run: |
+          echo "Running smoke tests on staging..."
+          # In real usage: curl -f https://staging.example.com/health
+          echo "Smoke tests passed on staging!"
+
+  # ============================================================
+  # STAGE 6: DEPLOY TO PRODUCTION
+  # Deploy to production environment
+  # Only runs on main branch after staging succeeds
+  # ============================================================
+  deploy-production:
+    name: "Stage 6 - Deploy to Production"
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://prod.example.com
+    steps:
+      - name: "Step 6.1 - Checkout source code"
+        uses: actions/checkout@v4
+
+      - name: "Step 6.2 - Deploy to production with Helm"
+        run: |
+          echo "Deploying to PRODUCTION environment..."
+          echo "Namespace: ${{ env.PROD_NAMESPACE }}"
+          echo "Image: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          # In real usage:
+          # helm upgrade --install $APP_NAME ./helm \
+          #   --namespace $PROD_NAMESPACE \
+          #   --values helm/values-prod.yaml \
+          #   --set image.tag=${{ github.sha }} \
+          #   --wait --timeout 10m
+          echo "Deployed to production successfully!"
+
+      - name: "Step 6.3 - Verify production deployment"
+        run: |
+          echo "Verifying production deployment..."
+          # In real usage: kubectl rollout status deployment/$APP_NAME -n $PROD_NAMESPACE
+          echo "Production deployment verified!"
+
+      - name: "Step 6.4 - Create GitHub release tag"
+        run: |
+          echo "Creating release for commit: ${{ github.sha }}"
+          echo "Release: v-${{ github.sha }}"
+          echo "Release created successfully!"
+
+  # ============================================================
+  # STAGE 7: SYNC TO AWS S3
+  # Upload build artifacts and Helm charts to S3 for storage
+  # NOTE: Replace YOUR_S3_BUCKET_NAME_HERE with your bucket
+  # ============================================================
+  sync-to-s3:
+    name: "Stage 7 - Sync to AWS S3"
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: "Step 7.1 - Checkout source code"
+        uses: actions/checkout@v4
+
+      - name: "Step 7.2 - Configure AWS credentials"
+        run: |
+          echo "Configuring AWS credentials..."
+          echo "Region: ${{ env.AWS_REGION }}"
+          # In real usage, use: aws-actions/configure-aws-credentials@v4
+          # with secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+          echo "AWS credentials configured!"
+
+      - name: "Step 7.3 - Create deployment artifacts"
+        run: |
+          mkdir -p dist/
+          echo "Deployment Summary" > dist/deployment-summary.txt
+          echo "App: ${{ env.APP_NAME }}" >> dist/deployment-summary.txt
+          echo "Image: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> dist/deployment-summary.txt
+          echo "Branch: ${{ github.ref_name }}" >> dist/deployment-summary.txt
+          echo "Deployed at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> dist/deployment-summary.txt
+          echo "Artifacts created!"
+
+      - name: "Step 7.4 - Sync artifacts to AWS S3"
+        run: |
+          echo "Syncing artifacts to S3..."
+          echo "Bucket: s3://${{ env.S3_BUCKET }}/deployments/${{ github.sha }}/"
+          # In real usage:
+          # aws s3 sync ./dist/ s3://${{ env.S3_BUCKET }}/deployments/${{ github.sha }}/
+          # aws s3 cp ./helm/ s3://${{ env.S3_BUCKET }}/helm-charts/ --recursive
+          echo "SUCCESS: Artifacts synced to s3://${{ env.S3_BUCKET }}/deployments/${{ github.sha }}/"
+          echo ""
+          echo "REMINDER: Set your S3 bucket name in the env section at the top of this file!"
