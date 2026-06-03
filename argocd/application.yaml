@@ -1,0 +1,92 @@
+# ArgoCD Application Definition
+# This tells ArgoCD to deploy our app from the Helm chart in this repository
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitops-app
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: gitops-app
+    app.kubernetes.io/managed-by: argocd
+  # Auto-cleanup: delete child resources when this app is deleted
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # Project this app belongs to
+  project: default
+
+  # Source: where to find the Helm chart
+  source:
+    repoURL: https://github.com/SumanthGhanta/ci-cd-gitops-pipeline
+    targetRevision: HEAD
+    path: helm
+    helm:
+      # Values file to use for configuration
+      valueFiles:
+        - values.yaml
+      # Override specific values
+      parameters:
+        - name: image.repository
+          value: ghcr.io/sumanthghanta/gitops-app
+        - name: replicaCount
+          value: "2"
+
+  # Destination: where to deploy in Kubernetes
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+
+  # Sync policy: how ArgoCD should manage deployments
+  syncPolicy:
+    automated:
+      # Auto-deploy when changes are detected
+      selfHeal: true
+      # Auto-sync when repo changes
+      prune: true
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Health checks: ArgoCD will monitor these
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+
+---
+# Staging application (separate from production)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitops-app-staging
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: gitops-app
+    environment: staging
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/SumanthGhanta/ci-cd-gitops-pipeline
+    targetRevision: HEAD
+    path: helm
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-staging.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: staging
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true
